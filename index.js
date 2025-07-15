@@ -24,6 +24,60 @@ async function run() {
     const db = client.db("Nexora");
 
     const usersCollection = db.collection("allUsers");
+    const apartmentsCollection = db.collection("allApartments");
+    const agreementsCollection = db.collection("allAgreements");
+
+    // custom middlewares here
+    const verifyFireBaseToken = async (req, res, next) => {
+      // console.log('header in iddleware', req.headers);
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).send({ message: "unauthorized access" });
+      }
+      const token = authHeader.split(" ")[1];
+
+      if (!token) {
+        return res.status(401).send({ message: "unauthorized access" });
+      }
+
+      //  verify the token here
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+      } catch (error) {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+    };
+
+    // verify admin role
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+
+      // used just for checking
+      // if (!user || user.role === "admin") {
+
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
+    // verify rider role
+    const verifyMembar = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+
+      // used just for checking
+      // if (!user || user.role === "admin") {
+
+      if (!user || user.role !== "rider") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
 
     // post an user to db
     app.post("/users", async (req, res) => {
@@ -65,6 +119,77 @@ async function run() {
         result: insertResult,
       });
     });
+
+  // ✅ GET Apartments with pagination + rent filter
+app.get('/apartments', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 6;
+    const skip = (page - 1) * limit;
+
+    const minRent = parseInt(req.query.minRent) || 0;
+    const maxRent = parseInt(req.query.maxRent) || 9999999;
+
+    const query = { rent: { $gte: minRent, $lte: maxRent } };
+
+    // total count
+    const total = await apartmentsCollection.countDocuments(query);
+
+    // apartments with pagination
+    const apartments = await apartmentsCollection
+      .find(query)
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
+    res.json({
+      success: true,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+      apartments,
+    });
+  } catch (err) {
+    console.error('❌ GET /apartments error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ✅ POST Agreement
+app.post('/agreements', verifyFireBaseToken, async (req, res) => {
+  try {
+    const agreementData = req.body;
+
+    // optional validation
+    if (!agreementData.userEmail || !agreementData.apartmentNo) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+
+    // check if user already applied for an apartment
+    const exists = await agreementsCollection.findOne({
+      userEmail: agreementData.userEmail,
+    });
+    if (exists) {
+      return res.status(400).json({
+        success: false,
+        message: 'Already applied for an apartment',
+      });
+    }
+
+    agreementData.status = 'pending';
+    agreementData.createdAt = new Date();
+
+    await agreementsCollection.insertOne(agreementData);
+
+    res.json({
+      success: true,
+      message: 'Agreement request submitted successfully',
+    });
+  } catch (err) {
+    console.error('❌ POST /agreements error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
