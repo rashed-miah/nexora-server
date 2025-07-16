@@ -3,6 +3,7 @@ const express = require("express");
 const app = express();
 const port = process.env.PORT || 3000;
 const cors = require("cors");
+const admin = require("firebase-admin");
 
 const { MongoClient, ObjectId, ServerApiVersion } = require("mongodb");
 
@@ -15,6 +16,14 @@ const client = new MongoClient(process.env.MONGODB_URI, {
 });
 app.use(cors());
 app.use(express.json());
+
+
+const serviceAccount = require("./NEXORA_FB_KEY.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
 
 async function run() {
   try {
@@ -123,25 +132,36 @@ async function run() {
   // ✅ GET Apartments with pagination + rent filter
 app.get('/apartments', async (req, res) => {
   try {
+    // 📌 Query params for pagination
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 6;
+    const limit = parseInt(req.query.limit) || 8; // fits better with grid-cols-4
     const skip = (page - 1) * limit;
 
+    // 📌 Query params for filtering
     const minRent = parseInt(req.query.minRent) || 0;
     const maxRent = parseInt(req.query.maxRent) || 9999999;
 
-    const query = { rent: { $gte: minRent, $lte: maxRent } };
+    // 📌 Query params for sorting
+    const sortBy = req.query.sortBy || 'rent'; // default sort field
+    const sortOrder = req.query.sortOrder === 'desc' ? -1 : 1; // default ascending
 
-    // total count
+    // 🔍 Build the MongoDB filter query
+    const query = {
+      rent: { $gte: minRent, $lte: maxRent },
+    };
+
+    // 🧮 Count total documents matching query
     const total = await apartmentsCollection.countDocuments(query);
 
-    // apartments with pagination
+    // 📦 Fetch paginated & sorted apartments
     const apartments = await apartmentsCollection
       .find(query)
+      .sort({ [sortBy]: sortOrder }) // ✅ dynamic sorting
       .skip(skip)
       .limit(limit)
       .toArray();
 
+    // ✅ Respond with paginated result
     res.json({
       success: true,
       total,
@@ -154,6 +174,7 @@ app.get('/apartments', async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
 
 // ✅ POST Agreement
 app.post('/agreements', verifyFireBaseToken, async (req, res) => {
@@ -190,6 +211,30 @@ app.post('/agreements', verifyFireBaseToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
+
+// ✅ Get user role by email
+app.get('/users/:email/role', async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const user = await usersCollection.findOne({ email });
+
+    if (!user) {
+      // default role if not found
+      return res.json({ role: 'user' });
+    }
+
+    res.json({ role: user.role || 'user' });
+  } catch (error) {
+    console.error('Error fetching user role:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
