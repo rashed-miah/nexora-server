@@ -420,50 +420,39 @@ async function run() {
     // 🎟️ COUPONS ROUTES
     // ----------------------------------------------------------------
 
-    // POST: Validate a coupon
-    app.post("/coupons/validate", verifyFireBaseToken, async (req, res) => {
-      try {
-        const { code } = req.body;
+    // ✅ Validate coupon
+app.post("/coupons/validate", verifyFireBaseToken, async (req, res) => {
+  try {
+    const { code } = req.body;
 
-        if (!code) {
-          return res
-            .status(400)
-            .json({ valid: false, message: "Coupon code is required" });
-        }
+    if (!code) {
+      return res.status(400).json({ valid: false, message: "Coupon code required" });
+    }
 
-        // Find coupon
-        const coupon = await couponsCollection.findOne({
-          code: code.toUpperCase(),
-        });
+    // 🔎 Find coupon in database
+    const coupon = await couponsCollection.findOne({ code: code.trim() });
 
-        if (!coupon) {
-          return res.json({ valid: false, message: "Invalid coupon code" });
-        }
+    if (!coupon) {
+      return res.status(404).json({ valid: false, message: "Coupon not found" });
+    }
 
-        // Check if active
-        if (!coupon.isActive) {
-          return res.json({ valid: false, message: "Coupon is not active" });
-        }
+    // ✅ Check expiry date here
+    if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
+      return res.status(400).json({ valid: false, message: "Coupon expired" });
+    }
 
-        // Check expiry
-        if (coupon.expiresAt && new Date(coupon.expiresAt) < new Date()) {
-          return res.json({ valid: false, message: "Coupon has expired" });
-        }
-
-        // ✅ Valid coupon
-        return res.json({
-          valid: true,
-          discountPercent: coupon.discountPercent,
-          message: "Coupon applied successfully",
-        });
-      } catch (err) {
-        console.error("POST /coupons/validate error:", err);
-        res.status(500).json({
-          valid: false,
-          message: "Server error while validating coupon",
-        });
-      }
+    // ✅ If valid, return discount info
+    return res.json({
+      valid: true,
+      discountPercent: coupon.discount,
+      description: coupon.description,
     });
+  } catch (err) {
+    console.error("POST /coupons/validate error:", err);
+    res.status(500).json({ valid: false, message: "Server error" });
+  }
+});
+
 
 
 app.get("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
@@ -509,40 +498,46 @@ app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
     // 💸 RENT ROUTES
     // ----------------------------------------------------------------
     // POST: Create a new rent payment
-    app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
-      try {
-        const { email, apartmentId, month, amount } = req.body;
+  app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
+  try {
+    const { email, apartmentId, month, amount } = req.body;
 
-        if (!email || !apartmentId || !month || !amount) {
-          return res.status(400).json({ message: "Missing required fields" });
-        }
+    if (!email || !apartmentId || !month || !amount) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
 
-        // ✅ Insert payment record
-        const newPayment = {
-          email,
-          apartmentId,
-          month,
-          amount,
-          status: "paid",
-          paidAt: new Date(),
-        };
-
-        const result = await rentPaymentsCollection.insertOne(newPayment);
-
-        // ✅ Optional: Update other collections if needed (like marking rent as paid)
-        // Example: If you store month-wise status in agreements, update it here
-
-        return res.json({
-          message: "Rent payment recorded successfully",
-          insertedId: result.insertedId,
-        });
-      } catch (err) {
-        console.error("POST /rent-payments error:", err);
-        res
-          .status(500)
-          .json({ message: "Server error while creating payment" });
-      }
+    // ✅ Check if already paid for this month
+    const alreadyPaid = await rentPaymentsCollection.findOne({
+      email,
+      apartmentId,
+      month,
     });
+
+    if (alreadyPaid) {
+      return res.status(400).json({ message: "Rent already paid for this month" });
+    }
+
+    // ✅ Store payment
+    const paymentData = {
+      email,
+      apartmentId,
+      month,
+      amount,
+      paidAt: new Date(),
+    };
+
+    await rentPaymentsCollection.insertOne(paymentData);
+
+    res.json({
+      success: true,
+      message: "Payment recorded successfully",
+    });
+  } catch (err) {
+    console.error("POST /rent-payments error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 
     app.get("/rent-payments/:email", verifyFireBaseToken, async (req, res) => {
       const email = req.params.email;
