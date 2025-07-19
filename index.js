@@ -528,83 +528,145 @@ async function run() {
     // 🎟️ COUPONS ROUTES
     // ----------------------------------------------------------------
 
-    // ✅ Validate coupon
-    app.post("/coupons/validate", verifyFireBaseToken, async (req, res) => {
-      try {
-        const { code } = req.body;
+  // ✅ Validate coupon
+app.post("/coupons/validate", verifyFireBaseToken, verifyMembar, async (req, res) => {
+  try {
+    const { code } = req.body;
 
-        if (!code) {
-          return res
-            .status(400)
-            .json({ valid: false, message: "Coupon code required" });
-        }
+    if (!code) {
+      return res
+        .status(400)
+        .json({ valid: false, message: "Coupon code required" });
+    }
 
-        // 🔎 Find coupon in database
-        const coupon = await couponsCollection.findOne({ code: code.trim() });
+    // 🔎 Find coupon in database
+    const coupon = await couponsCollection.findOne({ code: code.trim() });
 
-        if (!coupon) {
-          return res
-            .status(404)
-            .json({ valid: false, message: "Coupon not found" });
-        }
+    if (!coupon) {
+      return res
+        .status(404)
+        .json({ valid: false, message: "Coupon not found" });
+    }
 
-        // ✅ Check expiry date here
-        if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
-          return res
-            .status(400)
-            .json({ valid: false, message: "Coupon expired" });
-        }
+    // ✅ Check expiry date here
+    if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
+      return res
+        .status(400)
+        .json({ valid: false, message: "Coupon expired" });
+    }
 
-        // ✅ If valid, return discount info
-        return res.json({
-          valid: true,
-          discountPercent: coupon.discount,
-          description: coupon.description,
-        });
-      } catch (err) {
-        console.error("POST /coupons/validate error:", err);
-        res.status(500).json({ valid: false, message: "Server error" });
-      }
+    // ✅ If valid, return discount info
+    return res.json({
+      valid: true,
+      discountPercent: coupon.discount,
+      description: coupon.description,
+      expiryDate: coupon.expiryDate, // include expiry date in response if needed
     });
+  } catch (err) {
+    console.error("POST /coupons/validate error:", err);
+    res.status(500).json({ valid: false, message: "Server error" });
+  }
+});
 
-    app.get("/coupons", async (req, res) => {
-      try {
-        const coupons = await couponsCollection.find().toArray();
-        res.send(coupons);
-      } catch (err) {
-        console.error("GET /coupons error:", err);
-        res.status(500).send({ message: "Server error" });
-      }
-    });
+// Get all coupons
+app.get("/coupons", async (req, res) => {
+  try {
+    const coupons = await couponsCollection.find().toArray();
+    res.send(coupons);
+  } catch (err) {
+    console.error("GET /coupons error:", err);
+    res.status(500).send({ message: "Server error" });
+  }
+});
 
-    app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
-      try {
-        const { code, discount, description } = req.body;
-        if (!code || !discount || !description) {
-          return res.status(400).json({ message: "All fields are required" });
-        }
+// Add a new coupon
+app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+  try {
+    const { code, discount, description, expiryDate } = req.body;
+    if (!code || !discount || !description || !expiryDate) {
+      return res.status(400).json({ message: "All fields are required, including expiryDate" });
+    }
 
-        const exists = await couponsCollection.findOne({ code });
-        if (exists) {
-          return res
-            .status(400)
-            .json({ message: "Coupon code already exists" });
-        }
+    // Check if coupon code already exists
+    const exists = await couponsCollection.findOne({ code });
+    if (exists) {
+      return res.status(400).json({ message: "Coupon code already exists" });
+    }
 
-        const couponData = {
+    // Prepare coupon data
+    const couponData = {
+      code,
+      discount,
+      description,
+      expiryDate: new Date(expiryDate),  // save expiryDate as Date object
+      createdAt: new Date(),
+    };
+
+    await couponsCollection.insertOne(couponData);
+    res.json({ success: true, message: "Coupon added successfully" });
+  } catch (err) {
+    console.error("POST /coupons error:", err);
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
+// Update coupon (add this to support edit)
+app.put("/coupons/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+  try {
+    const couponId = req.params.id;
+    const { code, discount, description, expiryDate } = req.body;
+
+    if (!code || !discount || !description || !expiryDate) {
+      return res.status(400).json({ message: "All fields are required, including expiryDate" });
+    }
+
+    // Check if another coupon with same code exists (exclude current coupon)
+    const exists = await couponsCollection.findOne({ code, _id: { $ne: new ObjectId(couponId) } });
+    if (exists) {
+      return res.status(400).json({ message: "Coupon code already exists" });
+    }
+
+    const updateResult = await couponsCollection.updateOne(
+      { _id: new ObjectId(couponId) },
+      {
+        $set: {
           code,
           discount,
           description,
-          createdAt: new Date(),
-        };
-
-        await couponsCollection.insertOne(couponData);
-        res.json({ success: true, message: "Coupon added successfully" });
-      } catch (err) {
-        console.error("POST /coupons error:", err);
-        res.status(500).send({ message: "Server error" });
+          expiryDate: new Date(expiryDate),
+          updatedAt: new Date(),
+        },
       }
-    });
+    );
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({ message: "Coupon not found" });
+    }
+
+    res.json({ success: true, message: "Coupon updated successfully" });
+  } catch (err) {
+    console.error("PUT /coupons/:id error:", err);
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
+// Delete coupon (add this if you want to support deletion)
+app.delete("/coupons/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+  try {
+    const couponId = req.params.id;
+    const deleteResult = await couponsCollection.deleteOne({ _id: new ObjectId(couponId) });
+
+    if (deleteResult.deletedCount === 0) {
+      return res.status(404).json({ message: "Coupon not found" });
+    }
+
+    res.json({ success: true, message: "Coupon deleted successfully" });
+  } catch (err) {
+    console.error("DELETE /coupons/:id error:", err);
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
 
     // ----------------------------------------------------------------
     // 💸 RENT ROUTES
@@ -778,12 +840,10 @@ async function run() {
           );
 
           if (result.modifiedCount === 0) {
-            return res
-              .status(404)
-              .json({
-                success: false,
-                message: "Announcement not found or unchanged",
-              });
+            return res.status(404).json({
+              success: false,
+              message: "Announcement not found or unchanged",
+            });
           }
 
           res.json({
