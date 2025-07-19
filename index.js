@@ -212,73 +212,183 @@ async function run() {
       }
     );
 
-    // ✅ PATCH Agreement (Accept/Reject)
-    app.patch(
-      "/agreements/:id",
-      verifyFireBaseToken,
-      verifyAdmin,
-      async (req, res) => {
-        try {
-          const { id } = req.params;
-          const { action, userEmail } = req.body;
 
-          // Update agreement status to checked
-          await agreementsCollection.updateOne(
-            { _id: new ObjectId(id) },
-            { $set: { status: "checked" } }
+ // ✅ PATCH Agreement (Accept/Reject)
+app.patch(
+  "/agreements/:id",
+  verifyFireBaseToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { action, userEmail } = req.body;
+
+      // Find the agreement first to know which apartment it refers to
+      const agreement = await agreementsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      if (!agreement) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Agreement not found" });
+      }
+
+      let newStatus;
+
+      if (action === "accept") {
+        newStatus = "accepted";
+
+        // ✅ Update user role to member
+        await usersCollection.updateOne(
+          { email: userEmail },
+          { $set: { role: "member" } }
+        );
+
+        // ✅ Update apartment availability to false
+        if (agreement.apartmentId) {
+          await apartmentsCollection.updateOne(
+            { _id: new ObjectId(agreement.apartmentId) },
+            { $set: { available: false } }
           );
-
-          if (action === "accept") {
-            // Update user role to member
-            await usersCollection.updateOne(
-              { email: userEmail },
-              { $set: { role: "member" } }
-            );
-          }
-
-          res.json({
-            success: true,
-            message: `Agreement ${
-              action === "accept" ? "accepted" : "rejected"
-            }`,
-          });
-        } catch (err) {
-          console.error("PATCH /agreements/:id error:", err);
-          res.status(500).json({ success: false, message: "Server error" });
         }
+
+        // ✅ Create initial unpaid rent record
+        const monthName = new Date().toLocaleString("default", {
+          month: "long",
+          year: "numeric",
+        });
+
+        await rentPaymentsCollection.insertOne({
+          userEmail,
+          apartmentId: agreement.apartmentId,
+          month: monthName,
+          amount: agreement.rent,
+          status: "unpaid",
+          generatedAt: new Date(),
+        });
+
+        // ✅ Update user's profile rent history
+        const nextDate = new Date();
+        nextDate.setMonth(nextDate.getMonth() + 1); // next rent due in 1 month
+        await usersCollection.updateOne(
+          { email: userEmail },
+          {
+            $set: { nextRentDate: nextDate },
+            $push: {
+              rentHistory: {
+                month: monthName,
+                amount: agreement.rent,
+                status: "unpaid",
+                createdAt: new Date(),
+              },
+            },
+          }
+        );
+
+      } else if (action === "reject") {
+        newStatus = "rejected";
+
+        // ✅ Keep apartment available
+        if (agreement.apartmentId) {
+          await apartmentsCollection.updateOne(
+            { _id: new ObjectId(agreement.apartmentId) },
+            { $set: { available: true } }
+          );
+        }
+      } else {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid action" });
+      }
+
+      // ✅ Update agreement status and decision time
+      await agreementsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            status: newStatus,
+            decisionAt: new Date(),
+          },
+        }
+      );
+
+      res.json({
+        success: true,
+        message: `Agreement ${newStatus}`,
+      });
+    } catch (err) {
+      console.error("PATCH /agreements/:id error:", err);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+
+
+cron.schedule("0 1 1 * *", async () => {
+  console.log("⏰ Running monthly rent generation...");
+  const now = new Date();
+
+  const dueUsers = await usersCollection
+    .find({ role: "member", nextRentDate: { $lte: now } })
+    .toArray();
+
+  for (const u of dueUsers) {
+    const lastRent = u.rentHistory?.[u.rentHistory.length - 1];
+    if (!lastRent) continue;
+
+    // ➡️ Insert new unpaid rent
+    await rentPaymentsCollection.insertOne({
+      userEmail: u.email,
+      apartmentId: lastRent.apartmentId,
+      month: now.toLocaleString("default", { month: "long", year: "numeric" }),
+      amount: lastRent.amount,
+      generatedAt: now,
+      status: "unpaid",
+    });
+
+    // ➡️ Update nextRentDate & rentHistory
+    const nextDate = new Date(now);
+    nextDate.setMonth(nextDate.getMonth() + 1);
+    await usersCollection.updateOne(
+      { email: u.email },
+      {
+        $set: { nextRentDate: nextDate },
+        $push: {
+          rentHistory: {
+            month: now.toLocaleString("default", {
+              month: "long",
+              year: "numeric",
+            }),
+            amount: lastRent.amount,
+            status: "unpaid",
+            createdAt: now,
+          },
+        },
       }
     );
+  }
+});
 
-    // GET agreements by user email
+
+    // ✅ GET agreements by user email
     app.get(
       "/agreements/user/:email",
       verifyFireBaseToken,
       async (req, res) => {
-        const email = req.params.email;
-        const status = req.query.status;
-        let filter = { userEmail: email };
-        if (status) filter.status = status;
         try {
+          const email = req.params.email;
+          const status = req.query.status;
+
+          const filter = { userEmail: email };
+          if (status) filter.status = status;
+
           const result = await agreementsCollection.find(filter).toArray();
-          res.json(result);
+          res.json(result); // clean and explicit
         } catch (err) {
           console.error("GET /agreements/user/:email error:", err);
           res.status(500).json({ message: "Server error" });
         }
-      }
-    );
-
-    // GET agreements by user
-    app.get(
-      "/agreements/user/:email",
-      verifyFireBaseToken,
-      async (req, res) => {
-        const email = req.params.email;
-        const status = req.query.status;
-        let filter = { userEmail: email };
-        if (status) filter.status = status;
-        const result = await agreementsCollection.find(filter).toArray();
-        res.send(result);
       }
     );
 
@@ -340,197 +450,216 @@ async function run() {
       }
     });
 
-    app.get(
-      "/users/:email/unpaid-rents",
-      verifyFireBaseToken,
-      async (req, res) => {
-        const { email } = req.params;
-        try {
-          const user = await usersCollection.findOne({ email });
-          if (!user) return res.status(404).json({ message: "User not found" });
+    // app.get(
+    //   "/users/:email/unpaid-rents",
+    //   verifyFireBaseToken,
+    //   async (req, res) => {
+    //     const { email } = req.params;
+    //     try {
+    //       const user = await usersCollection.findOne({ email });
+    //       if (!user) return res.status(404).json({ message: "User not found" });
 
-          const unpaid = (user.rentHistory || []).filter(
-            (entry) => entry.status !== "paid"
-          );
-          res.json(unpaid);
-        } catch (err) {
-          console.error("GET /users/:email/unpaid-rents error:", err);
-          res.status(500).json({ message: "Server error" });
-        }
-      }
-    );
+    //       const unpaid = (user.rentHistory || []).filter(
+    //         (entry) => entry.status !== "paid"
+    //       );
+    //       res.json(unpaid);
+    //     } catch (err) {
+    //       console.error("GET /users/:email/unpaid-rents error:", err);
+    //       res.status(500).json({ message: "Server error" });
+    //     }
+    //   }
+    // );
 
     // PATCH: update a user's role (secure)
-    app.patch("/users/:email/role", verifyFireBaseToken, async (req, res) => {
-      try {
-        const email = req.params.email;
-        const { role } = req.body;
-        if (!role) {
-          return res
-            .status(400)
-            .json({ message: "Missing role in request body" });
-        }
-        // Find user first
-        const user = await usersCollection.findOne({ email });
-        if (!user) {
-          return res.status(404).json({ message: "User not found" });
-        }
-        // If downgrading to "user", perform extra cleanup
-        if (role === "user") {
-          // 1️⃣ Find accepted agreement for this user
-          const acceptedAgreement = await agreementsCollection.findOne({
-            userEmail: email,
-            status: "accepted",
-          });
-          if (acceptedAgreement) {
-            // 2️⃣ Mark apartment as available again
-            await apartmentsCollection.updateOne(
-              {
-                apartmentNo: acceptedAgreement.apartmentNo,
-                block: acceptedAgreement.block,
-              },
-              { $set: { available: true }, $unset: { rentedBy: "" } }
-            );
-            // 3️⃣ Remove or update agreement
-            await agreementsCollection.deleteOne({
-              _id: acceptedAgreement._id,
-            });
-          }
-        }
-        // Update user role
-        const result = await usersCollection.updateOne(
-          { email: email },
-          { $set: { role: role } }
-        );
+    // app.patch("/users/:email/role", verifyFireBaseToken, async (req, res) => {
+    //   try {
+    //     const email = req.params.email;
+    //     const { role } = req.body;
+    //     if (!role) {
+    //       return res
+    //         .status(400)
+    //         .json({ message: "Missing role in request body" });
+    //     }
+    //     // Find user first
+    //     const user = await usersCollection.findOne({ email });
+    //     if (!user) {
+    //       return res.status(404).json({ message: "User not found" });
+    //     }
+    //     // If downgrading to "user", perform extra cleanup
+    //     if (role === "user") {
+    //       // 1️⃣ Find accepted agreement for this user
+    //       const acceptedAgreement = await agreementsCollection.findOne({
+    //         userEmail: email,
+    //         status: "accepted",
+    //       });
+    //       if (acceptedAgreement) {
+    //         // 2️⃣ Mark apartment as available again
+    //         await apartmentsCollection.updateOne(
+    //           {
+    //             apartmentNo: acceptedAgreement.apartmentNo,
+    //             block: acceptedAgreement.block,
+    //           },
+    //           { $set: { available: true }, $unset: { rentedBy: "" } }
+    //         );
+    //         // 3️⃣ Remove or update agreement
+    //         await agreementsCollection.deleteOne({
+    //           _id: acceptedAgreement._id,
+    //         });
+    //       }
+    //     }
+    //     // Update user role
+    //     const result = await usersCollection.updateOne(
+    //       { email: email },
+    //       { $set: { role: role } }
+    //     );
 
-        if (result.matchedCount === 0) {
-          return res.status(404).json({ message: "User not found" });
-        }
-        return res.json({
-          message: `Role was set to '${role}'`,
-          modifiedCount: result.modifiedCount,
-        });
-      } catch (err) {
-        console.error("PATCH /users/:email/role error:", err);
-        res.status(500).json({ message: "Server error while updating role" });
-      }
-    });
+    //     if (result.matchedCount === 0) {
+    //       return res.status(404).json({ message: "User not found" });
+    //     }
+    //     return res.json({
+    //       message: `Role was set to '${role}'`,
+    //       modifiedCount: result.modifiedCount,
+    //     });
+    //   } catch (err) {
+    //     console.error("PATCH /users/:email/role error:", err);
+    //     res.status(500).json({ message: "Server error while updating role" });
+    //   }
+    // });
 
     // ----------------------------------------------------------------
     // 🎟️ COUPONS ROUTES
     // ----------------------------------------------------------------
 
     // ✅ Validate coupon
-app.post("/coupons/validate", verifyFireBaseToken, async (req, res) => {
-  try {
-    const { code } = req.body;
+    app.post("/coupons/validate", verifyFireBaseToken, async (req, res) => {
+      try {
+        const { code } = req.body;
 
-    if (!code) {
-      return res.status(400).json({ valid: false, message: "Coupon code required" });
-    }
+        if (!code) {
+          return res
+            .status(400)
+            .json({ valid: false, message: "Coupon code required" });
+        }
 
-    // 🔎 Find coupon in database
-    const coupon = await couponsCollection.findOne({ code: code.trim() });
+        // 🔎 Find coupon in database
+        const coupon = await couponsCollection.findOne({ code: code.trim() });
 
-    if (!coupon) {
-      return res.status(404).json({ valid: false, message: "Coupon not found" });
-    }
+        if (!coupon) {
+          return res
+            .status(404)
+            .json({ valid: false, message: "Coupon not found" });
+        }
 
-    // ✅ Check expiry date here
-    if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
-      return res.status(400).json({ valid: false, message: "Coupon expired" });
-    }
+        // ✅ Check expiry date here
+        if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
+          return res
+            .status(400)
+            .json({ valid: false, message: "Coupon expired" });
+        }
 
-    // ✅ If valid, return discount info
-    return res.json({
-      valid: true,
-      discountPercent: coupon.discount,
-      description: coupon.description,
+        // ✅ If valid, return discount info
+        return res.json({
+          valid: true,
+          discountPercent: coupon.discount,
+          description: coupon.description,
+        });
+      } catch (err) {
+        console.error("POST /coupons/validate error:", err);
+        res.status(500).json({ valid: false, message: "Server error" });
+      }
     });
-  } catch (err) {
-    console.error("POST /coupons/validate error:", err);
-    res.status(500).json({ valid: false, message: "Server error" });
-  }
-});
 
+    app.get("/coupons", async (req, res) => {
+      try {
+        const coupons = await couponsCollection.find().toArray();
+        res.send(coupons);
+      } catch (err) {
+        console.error("GET /coupons error:", err);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
 
+    app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+      try {
+        const { code, discount, description } = req.body;
+        if (!code || !discount || !description) {
+          return res.status(400).json({ message: "All fields are required" });
+        }
 
-app.get("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
-  try {
-    const coupons = await couponsCollection.find().toArray();
-    res.send(coupons);
-  } catch (err) {
-    console.error("GET /coupons error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
+        const exists = await couponsCollection.findOne({ code });
+        if (exists) {
+          return res
+            .status(400)
+            .json({ message: "Coupon code already exists" });
+        }
 
+        const couponData = {
+          code,
+          discount,
+          description,
+          createdAt: new Date(),
+        };
 
-app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
-  try {
-    const { code, discount, description } = req.body;
-    if (!code || !discount || !description) {
-      return res.status(400).json({ message: "All fields are required" });
-    }
-
-    const exists = await couponsCollection.findOne({ code });
-    if (exists) {
-      return res.status(400).json({ message: "Coupon code already exists" });
-    }
-
-    const couponData = {
-      code,
-      discount,
-      description,
-      createdAt: new Date(),
-    };
-
-    await couponsCollection.insertOne(couponData);
-    res.json({ success: true, message: "Coupon added successfully" });
-  } catch (err) {
-    console.error("POST /coupons error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
-
+        await couponsCollection.insertOne(couponData);
+        res.json({ success: true, message: "Coupon added successfully" });
+      } catch (err) {
+        console.error("POST /coupons error:", err);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
 
     // ----------------------------------------------------------------
     // 💸 RENT ROUTES
     // ----------------------------------------------------------------
-    // POST: Create a new rent payment
-  app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
-  try {
-    const { email, apartmentId, month, amount } = req.body;
 
-    if (!email || !apartmentId || !month || !amount) {
+    
+  // ✅ POST: Record a rent payment (mark as paid)
+app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
+  try {
+    const { userEmail, apartmentId, month, amount } = req.body;
+
+    if (!userEmail || !apartmentId || !month || !amount) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // ✅ Check if already paid for this month
+    // Check if already paid for this month
     const alreadyPaid = await rentPaymentsCollection.findOne({
-      email,
+      userEmail,
       apartmentId,
       month,
+      status: "paid", // only consider already-paid records
     });
 
     if (alreadyPaid) {
       return res.status(400).json({ message: "Rent already paid for this month" });
     }
 
-    // ✅ Store payment
-    const paymentData = {
-      email,
-      apartmentId,
-      month,
-      amount,
-      paidAt: new Date(),
-    };
+    // Update or insert payment as paid
+    const result = await rentPaymentsCollection.updateOne(
+      { userEmail, apartmentId, month },
+      {
+        $set: {
+          userEmail,
+          apartmentId,
+          month,
+          amount,
+          status: "paid",
+          paidAt: new Date(),
+        },
+      },
+      { upsert: true } // create if not exists
+    );
 
-    await rentPaymentsCollection.insertOne(paymentData);
+    // Update user's rent history status
+    await usersCollection.updateOne(
+      { email: userEmail, "rentHistory.month": month },
+      { $set: { "rentHistory.$.status": "paid" } }
+    );
 
     res.json({
       success: true,
       message: "Payment recorded successfully",
+      upserted: result.upsertedCount > 0,
     });
   } catch (err) {
     console.error("POST /rent-payments error:", err);
@@ -538,161 +667,60 @@ app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
   }
 });
 
+// ✅ GET: All rent payments for a user
+app.get("/rent-payments/:email", verifyFireBaseToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    const status = req.query.status;
 
-    app.get("/rent-payments/:email", verifyFireBaseToken, async (req, res) => {
-      const email = req.params.email;
-      const status = req.query.status;
-      const filter = { userEmail: email };
-      if (status) filter.status = status;
+    const filter = { userEmail: email };
+    if (status) filter.status = status;
 
-      try {
-        const rents = await rentPaymentsCollection.find(filter).toArray();
-        res.json(rents);
-      } catch (err) {
-        console.error("GET /rent-payments/:email error:", err);
-        res.status(500).json({ message: "Server error" });
-      }
+    const rents = await rentPaymentsCollection.find(filter).toArray();
+    res.json(rents);
+  } catch (err) {
+    console.error("GET /rent-payments/:email error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ✅ PATCH: Update a rent payment status
+app.patch("/rent-payments/:id", verifyFireBaseToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { status } = req.body;
+
+    const updateResult = await rentPaymentsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: status || "paid", paidAt: new Date() } }
+    );
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({ message: "Rent record not found" });
+    }
+
+    // Find updated rent payment to sync with user rentHistory
+    const rentPayment = await rentPaymentsCollection.findOne({
+      _id: new ObjectId(id),
     });
+    if (!rentPayment) {
+      return res.status(404).json({ message: "Rent payment not found after update" });
+    }
 
-    app.patch("/rent-payments/:id", verifyFireBaseToken, async (req, res) => {
-      const id = req.params.id;
-      const { status } = req.body;
+    await usersCollection.updateOne(
+      { email: rentPayment.userEmail, "rentHistory.month": rentPayment.month },
+      { $set: { "rentHistory.$.status": "paid" } }
+    );
 
-      try {
-        // Update the rent payment document
-        const updateResult = await rentPaymentsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { status: status || "paid", paidAt: new Date() } }
-        );
-
-        if (updateResult.modifiedCount === 0) {
-          return res.status(404).json({ message: "Rent record not found" });
-        }
-
-        // Find the updated rent payment to get userEmail and month
-        const rentPayment = await rentPaymentsCollection.findOne({
-          _id: new ObjectId(id),
-        });
-
-        if (!rentPayment) {
-          return res
-            .status(404)
-            .json({ message: "Rent payment not found after update" });
-        }
-
-        const { userEmail, month } = rentPayment;
-
-        // Update user's rentHistory status for that month to "paid"
-        const userUpdateResult = await usersCollection.updateOne(
-          { email: userEmail, "rentHistory.month": month },
-          { $set: { "rentHistory.$.status": "paid" } }
-        );
-
-        if (userUpdateResult.modifiedCount === 0) {
-          // Optional: you can respond with a warning if user rentHistory not updated
-          console.warn(
-            `No rentHistory entry updated for user ${userEmail}, month ${month}`
-          );
-        }
-
-        res.json({
-          success: true,
-          message: "Rent marked as paid and user rentHistory updated.",
-        });
-      } catch (err) {
-        console.error("PATCH /rent-payments/:id error:", err);
-        res.status(500).json({ message: "Server error" });
-      }
+    res.json({
+      success: true,
+      message: "Rent marked as paid and user rentHistory updated",
     });
-
-    // PATCH: Accept or Reject Agreement
-    //     app.patch(
-    //       "/agreements/:id",
-    //       verifyFireBaseToken,
-    //       verifyAdmin,
-    //       async (req, res) => {
-    //         const { id } = req.params;
-    //         const { action, userEmail } = req.body;
-
-    //         try {
-    //           const objectId = new ObjectId(id);
-
-    //           // find the agreement
-    //           const agreement = await agreementsCollection.findOne({
-    //             _id: objectId,
-    //           });
-    //           if (!agreement) {
-    //             return res.status(404).send({ message: "Agreement not found" });
-    //           }
-
-    //           const updateDoc = { $set: { decisionAt: new Date() } };
-
-    //           if (action === "accept") {
-    //             // update agreement status
-    //             updateDoc.$set.status = "accepted";
-
-    //             // ⭐️ Update user role to member
-    //             await usersCollection.updateOne(
-    //               { email: userEmail },
-    //               { $set: { role: "member" } }
-    //             );
-
-    //             // ⭐️ Update apartment (available -> false, rentedBy = userEmail)
-    //             await apartmentsCollection.updateOne(
-    //               { _id: new ObjectId(agreement.apartmentId) },
-    //               { $set: { available: false, rentedBy: userEmail } }
-    //             );
-
-    //             // ⭐️ Create initial rent record
-    //             const monthName = new Date().toLocaleString("default", {
-    //               month: "long",
-    //               year: "numeric",
-    //             });
-
-    //             await rentPaymentsCollection.insertOne({
-    //               userEmail,
-    //               month: monthName,
-    //               amount: agreement.rent,
-    //               generatedAt: new Date(),
-    //               status: "unpaid",
-    //             });
-
-    //             // ⭐️ Update user profile with nextRentDate and rentHistory
-    //             // const nextDate = new Date();
-    //             // nextDate.setMonth(nextDate.getMonth() + 1);
-    // // *******************************************⭐️****************************************⭐️*******************************⭐️***************************************v⭐️*********
-    //             const nextDate = new Date();
-    // nextDate.setMinutes(nextDate.getMinutes() + 2); // treat 1 min as a month in test
-
-    //             await usersCollection.updateOne(
-    //               { email: userEmail },
-    //               {
-    //                 $set: { nextRentDate: nextDate },
-    //                 $push: {
-    //                   rentHistory: {
-    //                     month: monthName,
-    //                     amount: agreement.rent,
-    //                     status: 'unpaid',
-    //                     createdAt: new Date(),
-    //                   },
-    //                 },
-    //               }
-    //             );
-    //           } else if (action === "reject") {
-    //             // just mark agreement as rejected
-    //             updateDoc.$set.status = "rejected";
-    //           }
-
-    //           // apply update to agreement
-    //           await agreementsCollection.updateOne({ _id: objectId }, updateDoc);
-
-    //           res.send({ success: true, action });
-    //         } catch (err) {
-    //           console.error("PATCH /agreements/:id error:", err);
-    //           res.status(500).send({ message: "Server error" });
-    //         }
-    //       }
-    //     );
+  } catch (err) {
+    console.error("PATCH /rent-payments/:id error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
     // GET all announcements
     app.get("/announcements", verifyFireBaseToken, async (req, res) => {
@@ -733,180 +761,3 @@ app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
 
-//  cron.schedule("0 1 * * *", async () => {
-//       console.log("⏰ Running monthly rent generation...");
-//       const now = new Date();
-
-//       // Find members whose nextRentDate is due
-//       const dueUsers = await usersCollection
-//         .find({
-//           role: "member",
-//           nextRentDate: { $lte: now },
-//         })
-//         .toArray();
-
-//       for (const u of dueUsers) {
-//         // Get last rent amount
-//         const lastRent = u.rentHistory?.[u.rentHistory.length - 1];
-//         if (!lastRent) continue;
-
-//         // Add new rent payment
-//         await rentPaymentsCollection.insertOne({
-//           userEmail: u.email,
-//           month: now.toLocaleString("default", {
-//             month: "long",
-//             year: "numeric",
-//           }),
-//           amount: lastRent.amount,
-//           generatedAt: now,
-//           status: "unpaid",
-//         });
-
-//         // Update user's rent history and next due date
-//         const nextDate = new Date(now);
-//         nextDate.setMonth(nextDate.getMonth() + 1);
-
-//         await usersCollection.updateOne(
-//           { email: u.email },
-//           {
-//             $set: { nextRentDate: nextDate },
-//             $push: {
-//               rentHistory: {
-//                 month: now.toLocaleString("default", {
-//                   month: "long",
-//                   year: "numeric",
-//                 }),
-//                 amount: lastRent.amount,
-//                 createdAt: now,
-//               },
-//             },
-//           }
-//         );
-//       }
-//     });
-
-//     cron.schedule("0 1 1 * *", async () => {
-//       console.log("⏰ Running monthly rent generation and downgrade check...");
-//       const now = new Date();
-
-//       const dueUsers = await usersCollection
-//         .find({
-//           role: "member",
-//           nextRentDate: { $lte: now },
-//         })
-//         .toArray();
-
-//       for (const u of dueUsers) {
-//         const lastRent = u.rentHistory?.[u.rentHistory.length - 1];
-//         if (!lastRent) continue;
-
-//         // ➡️ Insert new unpaid rent
-//         await rentPaymentsCollection.insertOne({
-//           userEmail: u.email,
-//           month: now.toLocaleString("default", {
-//             month: "long",
-//             year: "numeric",
-//           }),
-//           amount: lastRent.amount,
-//           generatedAt: now,
-//           status: "unpaid",
-//         });
-
-//         // ➡️ Update nextRentDate & history
-//         const nextDate = new Date(now);
-//         nextDate.setMonth(nextDate.getMonth() + 1);
-//         await usersCollection.updateOne(
-//           { email: u.email },
-//           {
-//             $set: { nextRentDate: nextDate },
-//             $push: {
-//               rentHistory: {
-//                 month: now.toLocaleString("default", {
-//                   month: "long",
-//                   year: "numeric",
-//                 }),
-//                 amount: lastRent.amount,
-//                 createdAt: now,
-//               },
-//             },
-//           }
-//         );
-
-//         // ➡️ Check unpaid and downgrade
-//         const unpaidCount = await rentPaymentsCollection.countDocuments({
-//           userEmail: u.email,
-//           status: "unpaid",
-//         });
-
-//         if (unpaidCount >= 3) {
-//           await usersCollection.updateOne(
-//             { email: u.email },
-//             { $set: { role: "user" } }
-//           );
-//           console.log(`❌ Downgraded ${u.email} to user due to 3 unpaid rents`);
-//         }
-//       }
-//     });
-
-//     cron.schedule("* * * * *", async () => {
-//   console.log("⏰ [TEST] Running monthly rent generation and downgrade check...");
-//   const now = new Date();
-
-//   const dueUsers = await usersCollection
-//     .find({
-//       role: "member",
-//       nextRentDate: { $lte: now },
-//     })
-//     .toArray();
-
-//   for (const u of dueUsers) {
-//     const lastRent = u.rentHistory?.[u.rentHistory.length - 1];
-//     if (!lastRent) continue;
-
-//     // ➡️ Insert new unpaid rent
-//     await rentPaymentsCollection.insertOne({
-//       userEmail: u.email,
-//       month: now.toLocaleString("default", {
-//         month: "long",
-//         year: "numeric",
-//       }),
-//       amount: lastRent.amount,
-//       generatedAt: now,
-//       status: "unpaid",
-//     });
-
-//     // ➡️ Update nextRentDate & history
-//     const nextDate = new Date(now);
-//     nextDate.setMinutes(nextDate.getMinutes() + 1); // ✅ treat 1 minute as "next month"
-//     await usersCollection.updateOne(
-//       { email: u.email },
-//       {
-//         $set: { nextRentDate: nextDate },
-//         $push: {
-//           rentHistory: {
-//             month: now.toLocaleString("default", {
-//               month: "long",
-//               year: "numeric",
-//             }),
-//             amount: lastRent.amount,
-//             createdAt: now,
-//           },
-//         },
-//       }
-//     );
-
-//     // ➡️ Check unpaid and downgrade
-//     const unpaidCount = await rentPaymentsCollection.countDocuments({
-//       userEmail: u.email,
-//       status: "unpaid",
-//     });
-
-//     if (unpaidCount >= 3) {
-//       await usersCollection.updateOne(
-//         { email: u.email },
-//         { $set: { role: "user" } }
-//       );
-//       console.log(`❌ Downgraded ${u.email} to user due to 3 unpaid rents`);
-//     }
-//   }
-// });
