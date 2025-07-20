@@ -222,7 +222,6 @@ async function run() {
           const { id } = req.params;
           const { action, userEmail } = req.body;
 
-          // Find the agreement first to know which apartment it refers to
           const agreement = await agreementsCollection.findOne({
             _id: new ObjectId(id),
           });
@@ -237,13 +236,13 @@ async function run() {
           if (action === "accept") {
             newStatus = "accepted";
 
-            // ✅ Update user role to member
+            // ✅ Update user role
             await usersCollection.updateOne(
               { email: userEmail },
               { $set: { role: "member" } }
             );
 
-            // ✅ Update apartment availability to false
+            // ✅ Mark apartment unavailable
             if (agreement.apartmentId) {
               await apartmentsCollection.updateOne(
                 { _id: new ObjectId(agreement.apartmentId) },
@@ -251,7 +250,7 @@ async function run() {
               );
             }
 
-            // ✅ Create initial unpaid rent record
+            // ✅ Create initial unpaid rent
             const monthName = new Date().toLocaleString("default", {
               month: "long",
               year: "numeric",
@@ -266,9 +265,9 @@ async function run() {
               generatedAt: new Date(),
             });
 
-            // ✅ Update user's profile rent history
+            // ✅ Add apartmentId to rentHistory
             const nextDate = new Date();
-            nextDate.setMonth(nextDate.getMonth() + 1); // next rent due in 1 month
+            nextDate.setMonth(nextDate.getMonth() + 1);
             await usersCollection.updateOne(
               { email: userEmail },
               {
@@ -277,6 +276,7 @@ async function run() {
                   rentHistory: {
                     month: monthName,
                     amount: agreement.rent,
+                    apartmentId: agreement.apartmentId, // ✅ added
                     status: "unpaid",
                     createdAt: new Date(),
                   },
@@ -285,8 +285,6 @@ async function run() {
             );
           } else if (action === "reject") {
             newStatus = "rejected";
-
-            // ✅ Keep apartment available
             if (agreement.apartmentId) {
               await apartmentsCollection.updateOne(
                 { _id: new ObjectId(agreement.apartmentId) },
@@ -299,21 +297,12 @@ async function run() {
               .json({ success: false, message: "Invalid action" });
           }
 
-          // ✅ Update agreement status and decision time
           await agreementsCollection.updateOne(
             { _id: new ObjectId(id) },
-            {
-              $set: {
-                status: newStatus,
-                decisionAt: new Date(),
-              },
-            }
+            { $set: { status: newStatus, decisionAt: new Date() } }
           );
 
-          res.json({
-            success: true,
-            message: `Agreement ${newStatus}`,
-          });
+          res.json({ success: true, message: `Agreement ${newStatus}` });
         } catch (err) {
           console.error("PATCH /agreements/:id error:", err);
           res.status(500).json({ success: false, message: "Server error" });
@@ -331,9 +320,8 @@ async function run() {
 
       for (const u of dueUsers) {
         const lastRent = u.rentHistory?.[u.rentHistory.length - 1];
-        if (!lastRent) continue;
+        if (!lastRent || !lastRent.apartmentId) continue; // ✅ ensure we have apartmentId
 
-        // ➡️ Insert new unpaid rent
         await rentPaymentsCollection.insertOne({
           userEmail: u.email,
           apartmentId: lastRent.apartmentId,
@@ -346,7 +334,6 @@ async function run() {
           status: "unpaid",
         });
 
-        // ➡️ Update nextRentDate & rentHistory
         const nextDate = new Date(now);
         nextDate.setMonth(nextDate.getMonth() + 1);
         await usersCollection.updateOne(
@@ -360,6 +347,7 @@ async function run() {
                   year: "numeric",
                 }),
                 amount: lastRent.amount,
+                apartmentId: lastRent.apartmentId, // ✅ include apartmentId
                 status: "unpaid",
                 createdAt: now,
               },
@@ -448,225 +436,178 @@ async function run() {
       }
     });
 
-    // app.get(
-    //   "/users/:email/unpaid-rents",
-    //   verifyFireBaseToken,
-    //   async (req, res) => {
-    //     const { email } = req.params;
-    //     try {
-    //       const user = await usersCollection.findOne({ email });
-    //       if (!user) return res.status(404).json({ message: "User not found" });
-
-    //       const unpaid = (user.rentHistory || []).filter(
-    //         (entry) => entry.status !== "paid"
-    //       );
-    //       res.json(unpaid);
-    //     } catch (err) {
-    //       console.error("GET /users/:email/unpaid-rents error:", err);
-    //       res.status(500).json({ message: "Server error" });
-    //     }
-    //   }
-    // );
-
-    // PATCH: update a user's role (secure)
-    // app.patch("/users/:email/role", verifyFireBaseToken, async (req, res) => {
-    //   try {
-    //     const email = req.params.email;
-    //     const { role } = req.body;
-    //     if (!role) {
-    //       return res
-    //         .status(400)
-    //         .json({ message: "Missing role in request body" });
-    //     }
-    //     // Find user first
-    //     const user = await usersCollection.findOne({ email });
-    //     if (!user) {
-    //       return res.status(404).json({ message: "User not found" });
-    //     }
-    //     // If downgrading to "user", perform extra cleanup
-    //     if (role === "user") {
-    //       // 1️⃣ Find accepted agreement for this user
-    //       const acceptedAgreement = await agreementsCollection.findOne({
-    //         userEmail: email,
-    //         status: "accepted",
-    //       });
-    //       if (acceptedAgreement) {
-    //         // 2️⃣ Mark apartment as available again
-    //         await apartmentsCollection.updateOne(
-    //           {
-    //             apartmentNo: acceptedAgreement.apartmentNo,
-    //             block: acceptedAgreement.block,
-    //           },
-    //           { $set: { available: true }, $unset: { rentedBy: "" } }
-    //         );
-    //         // 3️⃣ Remove or update agreement
-    //         await agreementsCollection.deleteOne({
-    //           _id: acceptedAgreement._id,
-    //         });
-    //       }
-    //     }
-    //     // Update user role
-    //     const result = await usersCollection.updateOne(
-    //       { email: email },
-    //       { $set: { role: role } }
-    //     );
-
-    //     if (result.matchedCount === 0) {
-    //       return res.status(404).json({ message: "User not found" });
-    //     }
-    //     return res.json({
-    //       message: `Role was set to '${role}'`,
-    //       modifiedCount: result.modifiedCount,
-    //     });
-    //   } catch (err) {
-    //     console.error("PATCH /users/:email/role error:", err);
-    //     res.status(500).json({ message: "Server error while updating role" });
-    //   }
-    // });
-
     // ----------------------------------------------------------------
     // 🎟️ COUPONS ROUTES
     // ----------------------------------------------------------------
 
-  // ✅ Validate coupon
-app.post("/coupons/validate", verifyFireBaseToken, verifyMembar, async (req, res) => {
-  try {
-    const { code } = req.body;
+    // ✅ Validate coupon
+    app.post(
+      "/coupons/validate",
+      verifyFireBaseToken,
+      verifyMembar,
+      async (req, res) => {
+        try {
+          const { code } = req.body;
 
-    if (!code) {
-      return res
-        .status(400)
-        .json({ valid: false, message: "Coupon code required" });
-    }
+          if (!code) {
+            return res
+              .status(400)
+              .json({ valid: false, message: "Coupon code required" });
+          }
 
-    // 🔎 Find coupon in database
-    const coupon = await couponsCollection.findOne({ code: code.trim() });
+          // 🔎 Find coupon in database
+          const coupon = await couponsCollection.findOne({ code: code.trim() });
 
-    if (!coupon) {
-      return res
-        .status(404)
-        .json({ valid: false, message: "Coupon not found" });
-    }
+          if (!coupon) {
+            return res
+              .status(404)
+              .json({ valid: false, message: "Coupon not found" });
+          }
 
-    // ✅ Check expiry date here
-    if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
-      return res
-        .status(400)
-        .json({ valid: false, message: "Coupon expired" });
-    }
+          // ✅ Check expiry date here
+          if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
+            return res
+              .status(400)
+              .json({ valid: false, message: "Coupon expired" });
+          }
 
-    // ✅ If valid, return discount info
-    return res.json({
-      valid: true,
-      discountPercent: coupon.discount,
-      description: coupon.description,
-      expiryDate: coupon.expiryDate, // include expiry date in response if needed
-    });
-  } catch (err) {
-    console.error("POST /coupons/validate error:", err);
-    res.status(500).json({ valid: false, message: "Server error" });
-  }
-});
-
-// Get all coupons
-app.get("/coupons", async (req, res) => {
-  try {
-    const coupons = await couponsCollection.find().toArray();
-    res.send(coupons);
-  } catch (err) {
-    console.error("GET /coupons error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
-
-// Add a new coupon
-app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
-  try {
-    const { code, discount, description, expiryDate } = req.body;
-    if (!code || !discount || !description || !expiryDate) {
-      return res.status(400).json({ message: "All fields are required, including expiryDate" });
-    }
-
-    // Check if coupon code already exists
-    const exists = await couponsCollection.findOne({ code });
-    if (exists) {
-      return res.status(400).json({ message: "Coupon code already exists" });
-    }
-
-    // Prepare coupon data
-    const couponData = {
-      code,
-      discount,
-      description,
-      expiryDate: new Date(expiryDate),  // save expiryDate as Date object
-      createdAt: new Date(),
-    };
-
-    await couponsCollection.insertOne(couponData);
-    res.json({ success: true, message: "Coupon added successfully" });
-  } catch (err) {
-    console.error("POST /coupons error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
-
-// Update coupon (add this to support edit)
-app.put("/coupons/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
-  try {
-    const couponId = req.params.id;
-    const { code, discount, description, expiryDate } = req.body;
-
-    if (!code || !discount || !description || !expiryDate) {
-      return res.status(400).json({ message: "All fields are required, including expiryDate" });
-    }
-
-    // Check if another coupon with same code exists (exclude current coupon)
-    const exists = await couponsCollection.findOne({ code, _id: { $ne: new ObjectId(couponId) } });
-    if (exists) {
-      return res.status(400).json({ message: "Coupon code already exists" });
-    }
-
-    const updateResult = await couponsCollection.updateOne(
-      { _id: new ObjectId(couponId) },
-      {
-        $set: {
-          code,
-          discount,
-          description,
-          expiryDate: new Date(expiryDate),
-          updatedAt: new Date(),
-        },
+          // ✅ If valid, return discount info
+          return res.json({
+            valid: true,
+            discountPercent: coupon.discount,
+            description: coupon.description,
+            expiryDate: coupon.expiryDate, // include expiry date in response if needed
+          });
+        } catch (err) {
+          console.error("POST /coupons/validate error:", err);
+          res.status(500).json({ valid: false, message: "Server error" });
+        }
       }
     );
 
-    if (updateResult.matchedCount === 0) {
-      return res.status(404).json({ message: "Coupon not found" });
-    }
+    // Get all coupons
+    app.get("/coupons", async (req, res) => {
+      try {
+        const coupons = await couponsCollection.find().toArray();
+        res.send(coupons);
+      } catch (err) {
+        console.error("GET /coupons error:", err);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
 
-    res.json({ success: true, message: "Coupon updated successfully" });
-  } catch (err) {
-    console.error("PUT /coupons/:id error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
+    // Add a new coupon
+    app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+      try {
+        const { code, discount, description, expiryDate } = req.body;
+        if (!code || !discount || !description || !expiryDate) {
+          return res
+            .status(400)
+            .json({ message: "All fields are required, including expiryDate" });
+        }
 
-// Delete coupon (add this if you want to support deletion)
-app.delete("/coupons/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
-  try {
-    const couponId = req.params.id;
-    const deleteResult = await couponsCollection.deleteOne({ _id: new ObjectId(couponId) });
+        // Check if coupon code already exists
+        const exists = await couponsCollection.findOne({ code });
+        if (exists) {
+          return res
+            .status(400)
+            .json({ message: "Coupon code already exists" });
+        }
 
-    if (deleteResult.deletedCount === 0) {
-      return res.status(404).json({ message: "Coupon not found" });
-    }
+        // Prepare coupon data
+        const couponData = {
+          code,
+          discount,
+          description,
+          expiryDate: new Date(expiryDate), // save expiryDate as Date object
+          createdAt: new Date(),
+        };
 
-    res.json({ success: true, message: "Coupon deleted successfully" });
-  } catch (err) {
-    console.error("DELETE /coupons/:id error:", err);
-    res.status(500).send({ message: "Server error" });
-  }
-});
+        await couponsCollection.insertOne(couponData);
+        res.json({ success: true, message: "Coupon added successfully" });
+      } catch (err) {
+        console.error("POST /coupons error:", err);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
 
+    // Update coupon (add this to support edit)
+    app.put(
+      "/coupons/:id",
+      verifyFireBaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const couponId = req.params.id;
+          const { code, discount, description, expiryDate } = req.body;
+
+          if (!code || !discount || !description || !expiryDate) {
+            return res
+              .status(400)
+              .json({
+                message: "All fields are required, including expiryDate",
+              });
+          }
+
+          // Check if another coupon with same code exists (exclude current coupon)
+          const exists = await couponsCollection.findOne({
+            code,
+            _id: { $ne: new ObjectId(couponId) },
+          });
+          if (exists) {
+            return res
+              .status(400)
+              .json({ message: "Coupon code already exists" });
+          }
+
+          const updateResult = await couponsCollection.updateOne(
+            { _id: new ObjectId(couponId) },
+            {
+              $set: {
+                code,
+                discount,
+                description,
+                expiryDate: new Date(expiryDate),
+                updatedAt: new Date(),
+              },
+            }
+          );
+
+          if (updateResult.matchedCount === 0) {
+            return res.status(404).json({ message: "Coupon not found" });
+          }
+
+          res.json({ success: true, message: "Coupon updated successfully" });
+        } catch (err) {
+          console.error("PUT /coupons/:id error:", err);
+          res.status(500).send({ message: "Server error" });
+        }
+      }
+    );
+
+    // Delete coupon (add this if you want to support deletion)
+    app.delete(
+      "/coupons/:id",
+      verifyFireBaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const couponId = req.params.id;
+          const deleteResult = await couponsCollection.deleteOne({
+            _id: new ObjectId(couponId),
+          });
+
+          if (deleteResult.deletedCount === 0) {
+            return res.status(404).json({ message: "Coupon not found" });
+          }
+
+          res.json({ success: true, message: "Coupon deleted successfully" });
+        } catch (err) {
+          console.error("DELETE /coupons/:id error:", err);
+          res.status(500).send({ message: "Server error" });
+        }
+      }
+    );
 
     // ----------------------------------------------------------------
     // 💸 RENT ROUTES
@@ -681,47 +622,39 @@ app.delete("/coupons/:id", verifyFireBaseToken, verifyAdmin, async (req, res) =>
           return res.status(400).json({ message: "Missing required fields" });
         }
 
-        // Check if already paid for this month
-        const alreadyPaid = await rentPaymentsCollection.findOne({
+        // Find existing unpaid record
+        const unpaid = await rentPaymentsCollection.findOne({
           userEmail,
           apartmentId,
           month,
-          status: "paid", // only consider already-paid records
+          status: "unpaid",
         });
 
-        if (alreadyPaid) {
+        if (!unpaid) {
           return res
             .status(400)
-            .json({ message: "Rent already paid for this month" });
+            .json({
+              message: "No unpaid rent found for this apartment and month",
+            });
         }
 
-        // Update or insert payment as paid
-        const result = await rentPaymentsCollection.updateOne(
-          { userEmail, apartmentId, month },
-          {
-            $set: {
-              userEmail,
-              apartmentId,
-              month,
-              amount,
-              status: "paid",
-              paidAt: new Date(),
-            },
-          },
-          { upsert: true } // create if not exists
+        // Mark as paid
+        await rentPaymentsCollection.updateOne(
+          { _id: unpaid._id },
+          { $set: { status: "paid", paidAt: new Date(), amount } }
         );
 
-        // Update user's rent history status
+        // Update user's rent history for this apartment and month
         await usersCollection.updateOne(
-          { email: userEmail, "rentHistory.month": month },
+          {
+            email: userEmail,
+            "rentHistory.month": month,
+            "rentHistory.apartmentId": apartmentId,
+          },
           { $set: { "rentHistory.$.status": "paid" } }
         );
 
-        res.json({
-          success: true,
-          message: "Payment recorded successfully",
-          upserted: result.upsertedCount > 0,
-        });
+        res.json({ success: true, message: "Payment recorded successfully" });
       } catch (err) {
         console.error("POST /rent-payments error:", err);
         res.status(500).json({ message: "Server error" });
@@ -760,7 +693,7 @@ app.delete("/coupons/:id", verifyFireBaseToken, verifyAdmin, async (req, res) =>
           return res.status(404).json({ message: "Rent record not found" });
         }
 
-        // Find updated rent payment to sync with user rentHistory
+        // Sync to user history
         const rentPayment = await rentPaymentsCollection.findOne({
           _id: new ObjectId(id),
         });
@@ -774,6 +707,7 @@ app.delete("/coupons/:id", verifyFireBaseToken, verifyAdmin, async (req, res) =>
           {
             email: rentPayment.userEmail,
             "rentHistory.month": rentPayment.month,
+            "rentHistory.apartmentId": rentPayment.apartmentId, // ✅ added
           },
           { $set: { "rentHistory.$.status": "paid" } }
         );
