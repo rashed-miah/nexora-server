@@ -145,57 +145,43 @@ async function run() {
     //  ✅  agreements
     // ----------------------------------------------------------------
 
-    // ✅ POST Agreement
+    // ✅ POST new agreement request
     app.post("/agreements", verifyFireBaseToken, async (req, res) => {
       try {
-        const { availability, userEmail, apartmentNo } = req.body;
         const agreementData = req.body;
+        const { userEmail, apartmentNo, availability } = agreementData;
 
-        // Check availability
-        if (availability === false) {
-          return res.status(400).json({
-            success: false,
-            message: "Apartment Unavailable",
-          });
-        }
-
-        // Validate required fields
         if (!userEmail || !apartmentNo) {
-          return res.status(400).json({
-            success: false,
-            message: "Missing required fields",
-          });
+          return res.status(400).json({ message: "Missing required fields" });
         }
 
-        // Check if user already has a pending or accepted agreement
+        if (availability === false) {
+          return res.status(400).json({ message: "Apartment Unavailable" });
+        }
+
+        // Prevent duplicate pending
         const existing = await agreementsCollection.findOne({
-          userEmail: userEmail,
+          userEmail,
           status: "pending",
         });
         if (existing) {
-          return res.status(400).json({
-            success: false,
-            message: "Already applied for an apartment",
-          });
+          return res
+            .status(400)
+            .json({ message: "Already applied for an apartment" });
         }
 
-        // Add server-side defaults
         agreementData.status = "pending";
         agreementData.createdAt = new Date();
-
         await agreementsCollection.insertOne(agreementData);
 
-        res.json({
-          success: true,
-          message: "Agreement request submitted successfully",
-        });
+        res.json({ success: true, message: "Agreement request submitted" });
       } catch (err) {
         console.error("POST /agreements error:", err);
-        res.status(500).json({ success: false, message: "Server error" });
+        res.status(500).json({ message: "Server error" });
       }
     });
 
-    // ✅ GET pending agreements
+    // ✅ GET agreements by status (admin only)
     app.get(
       "/agreements",
       verifyFireBaseToken,
@@ -209,12 +195,12 @@ async function run() {
           res.json(agreements);
         } catch (err) {
           console.error("GET /agreements error:", err);
-          res.status(500).json({ success: false, message: "Server error" });
+          res.status(500).json({ message: "Server error" });
         }
       }
     );
 
-    // ✅ PATCH Agreement (Accept/Reject)
+    // ✅ PATCH agreement (accept or reject)
     app.patch(
       "/agreements/:id",
       verifyFireBaseToken,
@@ -228,23 +214,20 @@ async function run() {
             _id: new ObjectId(id),
           });
           if (!agreement) {
-            return res
-              .status(404)
-              .json({ success: false, message: "Agreement not found" });
+            return res.status(404).json({ message: "Agreement not found" });
           }
 
           let newStatus;
-
           if (action === "accept") {
             newStatus = "accepted";
 
-            // ✅ Update user role
+            // make user a member
             await usersCollection.updateOne(
               { email: userEmail },
               { $set: { role: "member" } }
             );
 
-            // ✅ Mark apartment unavailable
+            // mark apartment unavailable
             if (agreement.apartmentId) {
               await apartmentsCollection.updateOne(
                 { _id: new ObjectId(agreement.apartmentId) },
@@ -252,12 +235,11 @@ async function run() {
               );
             }
 
-            // ✅ Create initial unpaid rent
+            // create initial unpaid rent
             const monthName = new Date().toLocaleString("default", {
               month: "long",
               year: "numeric",
             });
-
             await rentPaymentsCollection.insertOne({
               userEmail,
               apartmentId: agreement.apartmentId,
@@ -267,7 +249,6 @@ async function run() {
               generatedAt: new Date(),
             });
 
-            // ✅ Add apartmentId to rentHistory
             const nextDate = new Date();
             nextDate.setMonth(nextDate.getMonth() + 1);
             await usersCollection.updateOne(
@@ -278,7 +259,7 @@ async function run() {
                   rentHistory: {
                     month: monthName,
                     amount: agreement.rent,
-                    apartmentId: agreement.apartmentId, // ✅ added
+                    apartmentId: agreement.apartmentId,
                     status: "unpaid",
                     createdAt: new Date(),
                   },
@@ -294,9 +275,7 @@ async function run() {
               );
             }
           } else {
-            return res
-              .status(400)
-              .json({ success: false, message: "Invalid action" });
+            return res.status(400).json({ message: "Invalid action" });
           }
 
           await agreementsCollection.updateOne(
@@ -307,7 +286,7 @@ async function run() {
           res.json({ success: true, message: `Agreement ${newStatus}` });
         } catch (err) {
           console.error("PATCH /agreements/:id error:", err);
-          res.status(500).json({ success: false, message: "Server error" });
+          res.status(500).json({ message: "Server error" });
         }
       }
     );
@@ -359,7 +338,7 @@ async function run() {
       }
     });
 
-    // ✅ GET agreements by user email
+    // ✅ GET agreements for a specific user
     app.get(
       "/agreements/user/:email",
       verifyFireBaseToken,
@@ -372,7 +351,7 @@ async function run() {
           if (status) filter.status = status;
 
           const result = await agreementsCollection.find(filter).toArray();
-          res.json(result); // clean and explicit
+          res.json(result);
         } catch (err) {
           console.error("GET /agreements/user/:email error:", err);
           res.status(500).json({ message: "Server error" });
@@ -641,7 +620,7 @@ async function run() {
               userEmail: userEmail || "",
               apartmentNo: apartmentNo || "",
               fullName: fullName || "",
-            }, 
+            },
           });
 
           res.send({ clientSecret: paymentIntent.client_secret });
@@ -723,7 +702,7 @@ async function run() {
     app.patch("/rent-payments/:id", verifyFireBaseToken, async (req, res) => {
       try {
         const id = req.params.id;
-        const { status,transactionId } = req.body;
+        const { status, transactionId } = req.body;
 
         const updateResult = await rentPaymentsCollection.updateOne(
           { _id: new ObjectId(id) },
@@ -861,6 +840,120 @@ async function run() {
         } catch (err) {
           console.error("DELETE /announcements/:id error:", err);
           res.status(500).json({ success: false, message: "Server error" });
+        }
+      }
+    );
+
+    // ✅ GET all members with userName from allAgreements
+    app.get("/members", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+      try {
+        const members = await usersCollection
+          .aggregate([
+            { $match: { role: "member" } },
+            {
+              $lookup: {
+                from: "allAgreements",
+                localField: "email",
+                foreignField: "userEmail",
+                as: "agreementInfo",
+              },
+            },
+            {
+              $addFields: {
+                userName: { $arrayElemAt: ["$agreementInfo.userName", 0] },
+                apartmentNo: {
+                  $arrayElemAt: ["$agreementInfo.apartmentNo", 0],
+                },
+                rent: { $arrayElemAt: ["$agreementInfo.rent", 0] },
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                email: 1,
+                role: 1,
+                userName: 1,
+                apartmentNo: 1,
+                rent: 1,
+              },
+            },
+          ])
+          .toArray();
+
+        res.json(members);
+      } catch (err) {
+        console.error("GET /members error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // ✅ Remove member (change role to user)
+    app.patch(
+      "/members/:email/remove",
+      verifyFireBaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const email = req.params.email;
+
+          // Find the member's current active agreement (accepted)
+          const agreement = await agreementsCollection.findOne({
+            userEmail: email,
+            status: "accepted",
+          });
+
+          if (!agreement) {
+            return res
+              .status(404)
+              .json({ message: "Member's agreement not found" });
+          }
+
+          // Update the apartment availability to true (free it)
+          if (agreement.apartmentId) {
+            await apartmentsCollection.updateOne(
+              { _id: new ObjectId(agreement.apartmentId) },
+              { $set: { available: true } }
+            );
+          }
+
+          // Change role to "user"
+          const updateRes = await usersCollection.updateOne(
+            { email },
+            { $set: { role: "user" } }
+          );
+
+          if (updateRes.matchedCount === 0) {
+            return res.status(404).json({ message: "Member not found" });
+          }
+
+          res.json({
+            success: true,
+            message: "Member removed and apartment freed",
+          });
+        } catch (err) {
+          console.error("PATCH /members/:email/remove error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // ✅ Get due months for a member
+    app.get(
+      "/members/:email/due-months",
+      verifyFireBaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const email = req.params.email;
+          const dueMonths = await rentPaymentsCollection
+            .find({ userEmail: email, status: "unpaid" })
+            .project({ month: 1, amount: 1 })
+            .toArray();
+
+          res.json(dueMonths);
+        } catch (err) {
+          console.error("GET /members/:email/due-months error:", err);
+          res.status(500).json({ message: "Server error" });
         }
       }
     );
