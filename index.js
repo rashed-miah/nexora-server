@@ -20,7 +20,10 @@ const cron = require("node-cron");
 app.use(cors());
 app.use(express.json());
 
-const serviceAccount = require("./NEXORA_FB_KEY.json");
+const decodedKey = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8"
+);
+const serviceAccount = JSON.parse(decodedKey);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -90,6 +93,9 @@ async function run() {
       }
       next();
     };
+
+
+
 
     // ----------------------------------------------------------------
     //  🧮 apartments
