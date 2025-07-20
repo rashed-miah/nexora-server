@@ -1,6 +1,6 @@
 require("dotenv").config();
 // At the top of your server file
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const express = require("express");
 const app = express();
 const port = process.env.PORT || 5000;
@@ -544,11 +544,9 @@ async function run() {
           const { code, discount, description, expiryDate } = req.body;
 
           if (!code || !discount || !description || !expiryDate) {
-            return res
-              .status(400)
-              .json({
-                message: "All fields are required, including expiryDate",
-              });
+            return res.status(400).json({
+              message: "All fields are required, including expiryDate",
+            });
           }
 
           // Check if another coupon with same code exists (exclude current coupon)
@@ -615,134 +613,160 @@ async function run() {
     // 💸 RENT ROUTES
     // ----------------------------------------------------------------
 
- 
-// ✅ Create payment intent (protected)
-app.post("/create-payment-intent", verifyFireBaseToken, async (req, res) => {
-  try {
-    const { amountInCents } = req.body;
+    // ✅ Create payment intent (protected)
+    app.post(
+      "/create-payment-intent",
+      verifyFireBaseToken,
+      async (req, res) => {
+        try {
+          const { amountInCents, userEmail, apartmentNo, fullName } = req.body;
 
-    if (!amountInCents || amountInCents <= 0) {
-      return res.status(400).json({ message: "Invalid amount" });
-    }
+          if (!amountInCents || amountInCents <= 0) {
+            return res.status(400).json({ message: "Invalid amount" });
+          }
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "bdt",
-      payment_method_types: ["card"],
-    });
+          // ✅ (optional) log or validate extra info
+          console.log("Creating payment intent for:", {
+            userEmail,
+            apartmentNo,
+            fullName,
+            amountInCents,
+          });
 
-    res.send({ clientSecret: paymentIntent.client_secret });
-  } catch (error) {
-    console.error("Payment Intent Error:", error);
-    res.status(500).send({ message: "Failed to create payment intent" });
-  }
-});
+          const paymentIntent = await stripe.paymentIntents.create({
+            amount: amountInCents,
+            currency: "bdt",
+            payment_method_types: ["card"],
+            metadata: {
+              userEmail: userEmail || "",
+              apartmentNo: apartmentNo || "",
+              fullName: fullName || "",
+            }, 
+          });
 
-
-// ✅ Record rent payment (manual trigger, kept for compatibility)
-app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
-  try {
-    const { userEmail, apartmentId, month, amount } = req.body;
-
-    if (!userEmail || !apartmentId || !month || !amount) {
-      return res.status(400).json({ message: "Missing required fields" });
-    }
-
-    const unpaid = await rentPaymentsCollection.findOne({
-      userEmail,
-      apartmentId,
-      month,
-      status: "unpaid",
-    });
-
-    if (!unpaid) {
-      return res
-        .status(400)
-        .json({ message: "No unpaid rent found for this apartment and month" });
-    }
-
-    await rentPaymentsCollection.updateOne(
-      { _id: unpaid._id },
-      { $set: { status: "paid", paidAt: new Date(), amount } }
+          res.send({ clientSecret: paymentIntent.client_secret });
+        } catch (error) {
+          console.error("Payment Intent Error:", error);
+          res.status(500).send({ message: "Failed to create payment intent" });
+        }
+      }
     );
 
-    await usersCollection.updateOne(
-      {
-        email: userEmail,
-        "rentHistory.month": month,
-        "rentHistory.apartmentId": apartmentId,
-      },
-      { $set: { "rentHistory.$.status": "paid" } }
-    );
+    // ✅ Record rent payment (manual trigger, kept for compatibility)
+    app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
+      try {
+        const { userEmail, apartmentId, month, amount } = req.body;
 
-    res.json({ success: true, message: "Payment recorded successfully" });
-  } catch (err) {
-    console.error("POST /rent-payments error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
+        if (!userEmail || !apartmentId || !month || !amount) {
+          return res.status(400).json({ message: "Missing required fields" });
+        }
 
+        const unpaid = await rentPaymentsCollection.findOne({
+          userEmail,
+          apartmentId,
+          month,
+          status: "unpaid",
+        });
 
-// ✅ Get rent payments for a user
-app.get("/rent-payments/:email", verifyFireBaseToken, async (req, res) => {
-  try {
-    const email = req.params.email;
-    const status = req.query.status;
+        if (!unpaid) {
+          return res.status(400).json({
+            message: "No unpaid rent found for this apartment and month",
+          });
+        }
 
-    const filter = { userEmail: email };
-    if (status) filter.status = status;
+        await rentPaymentsCollection.updateOne(
+          { _id: unpaid._id },
+          {
+            $set: {
+              status: "paid",
+              paidAt: new Date(),
+              amount,
+              transactionId: result.paymentIntent.id, // ✅ save transaction ID
+            },
+          }
+        );
 
-    const rents = await rentPaymentsCollection.find(filter).toArray();
-    res.json(rents);
-  } catch (err) {
-    console.error("GET /rent-payments/:email error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
+        await usersCollection.updateOne(
+          {
+            email: userEmail,
+            "rentHistory.month": month,
+            "rentHistory.apartmentId": apartmentId,
+          },
+          { $set: { "rentHistory.$.status": "paid" } }
+        );
 
-
-// ✅ Update a rent payment status
-app.patch("/rent-payments/:id", verifyFireBaseToken, async (req, res) => {
-  try {
-    const id = req.params.id;
-    const { status } = req.body;
-
-    const updateResult = await rentPaymentsCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { status: status || "paid", paidAt: new Date() } }
-    );
-
-    if (updateResult.matchedCount === 0) {
-      return res.status(404).json({ message: "Rent record not found" });
-    }
-
-    const rentPayment = await rentPaymentsCollection.findOne({
-      _id: new ObjectId(id),
+        res.json({ success: true, message: "Payment recorded successfully" });
+      } catch (err) {
+        console.error("POST /rent-payments error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
     });
-    if (!rentPayment) {
-      return res
-        .status(404)
-        .json({ message: "Rent payment not found after update" });
-    }
 
-    await usersCollection.updateOne(
-      {
-        email: rentPayment.userEmail,
-        "rentHistory.month": rentPayment.month,
-        "rentHistory.apartmentId": rentPayment.apartmentId,
-      },
-      { $set: { "rentHistory.$.status": "paid" } }
-    );
+    // ✅ Get rent payments for a user
+    app.get("/rent-payments/:email", verifyFireBaseToken, async (req, res) => {
+      try {
+        const email = req.params.email;
+        const status = req.query.status;
 
-    res.json({
-      success: true,
-      message: "Rent marked as paid and user rentHistory updated",
+        const filter = { userEmail: email };
+        if (status) filter.status = status;
+
+        const rents = await rentPaymentsCollection.find(filter).toArray();
+        res.json(rents);
+      } catch (err) {
+        console.error("GET /rent-payments/:email error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
     });
-  } catch (err) {
-    console.error("PATCH /rent-payments/:id error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
+
+    // ✅ Update a rent payment status
+    app.patch("/rent-payments/:id", verifyFireBaseToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { status,transactionId } = req.body;
+
+        const updateResult = await rentPaymentsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: status || "paid",
+              paidAt: new Date(),
+              transactionId: transactionId,
+            },
+          }
+        );
+
+        if (updateResult.matchedCount === 0) {
+          return res.status(404).json({ message: "Rent record not found" });
+        }
+
+        const rentPayment = await rentPaymentsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!rentPayment) {
+          return res
+            .status(404)
+            .json({ message: "Rent payment not found after update" });
+        }
+
+        await usersCollection.updateOne(
+          {
+            email: rentPayment.userEmail,
+            "rentHistory.month": rentPayment.month,
+            "rentHistory.apartmentId": rentPayment.apartmentId,
+          },
+          { $set: { "rentHistory.$.status": "paid" } }
+        );
+
+        res.json({
+          success: true,
+          message: "Rent marked as paid and user rentHistory updated",
+        });
+      } catch (err) {
+        console.error("PATCH /rent-payments/:id error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
 
     // ----------------------------------------------------------------
     //  ANNOUNCEMENTS ROUTES
