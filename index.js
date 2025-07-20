@@ -480,14 +480,13 @@ async function run() {
     // Add a new coupon
     app.post("/coupons", verifyFireBaseToken, verifyAdmin, async (req, res) => {
       try {
-        const { code, discount, description, expiryDate } = req.body;
+        const { code, discount, description, expiryDate, available } = req.body;
         if (!code || !discount || !description || !expiryDate) {
           return res
             .status(400)
             .json({ message: "All fields are required, including expiryDate" });
         }
 
-        // Check if coupon code already exists
         const exists = await couponsCollection.findOne({ code });
         if (exists) {
           return res
@@ -495,12 +494,12 @@ async function run() {
             .json({ message: "Coupon code already exists" });
         }
 
-        // Prepare coupon data
         const couponData = {
           code,
           discount,
           description,
-          expiryDate: new Date(expiryDate), // save expiryDate as Date object
+          expiryDate: new Date(expiryDate),
+          available: typeof available === "boolean" ? available : true, // default to true
           createdAt: new Date(),
         };
 
@@ -512,7 +511,7 @@ async function run() {
       }
     });
 
-    // Update coupon (add this to support edit)
+    // Update coupon
     app.put(
       "/coupons/:id",
       verifyFireBaseToken,
@@ -520,7 +519,8 @@ async function run() {
       async (req, res) => {
         try {
           const couponId = req.params.id;
-          const { code, discount, description, expiryDate } = req.body;
+          const { code, discount, description, expiryDate, available } =
+            req.body;
 
           if (!code || !discount || !description || !expiryDate) {
             return res.status(400).json({
@@ -528,7 +528,6 @@ async function run() {
             });
           }
 
-          // Check if another coupon with same code exists (exclude current coupon)
           const exists = await couponsCollection.findOne({
             code,
             _id: { $ne: new ObjectId(couponId) },
@@ -547,6 +546,7 @@ async function run() {
                 discount,
                 description,
                 expiryDate: new Date(expiryDate),
+                available: typeof available === "boolean" ? available : true,
                 updatedAt: new Date(),
               },
             }
@@ -844,6 +844,10 @@ async function run() {
       }
     );
 
+    // ----------------------------------------------------------------
+    // ✅ ADMIN DASHBOARD ROUTES
+    // ----------------------------------------------------------------
+
     // ✅ GET all members with userName from allAgreements
     app.get("/members", verifyFireBaseToken, verifyAdmin, async (req, res) => {
       try {
@@ -953,6 +957,113 @@ async function run() {
           res.json(dueMonths);
         } catch (err) {
           console.error("GET /members/:email/due-months error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    app.get(
+      "/admin/stats",
+      verifyFireBaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          // 🔹 Pipeline for apartments availability
+          const roomStats = await apartmentsCollection
+            .aggregate([
+              {
+                $group: {
+                  _id: null,
+                  total: { $sum: 1 },
+                  available: {
+                    $sum: {
+                      $cond: [{ $eq: ["$available", true] }, 1, 0],
+                    },
+                  },
+                  unavailable: {
+                    $sum: {
+                      $cond: [{ $eq: ["$available", false] }, 1, 0],
+                    },
+                  },
+                },
+              },
+              {
+                $project: {
+                  _id: 0,
+                  total: 1,
+                  available: 1,
+                  unavailable: 1,
+                  availablePercentage: {
+                    $cond: [
+                      { $eq: ["$total", 0] },
+                      0,
+                      {
+                        $multiply: [{ $divide: ["$available", "$total"] }, 100],
+                      },
+                    ],
+                  },
+                  unavailablePercentage: {
+                    $cond: [
+                      { $eq: ["$total", 0] },
+                      0,
+                      {
+                        $multiply: [
+                          { $divide: ["$unavailable", "$total"] },
+                          100,
+                        ],
+                      },
+                    ],
+                  },
+                },
+              },
+            ])
+            .toArray();
+
+          // Default if no rooms
+          const rooms = roomStats[0] || {
+            total: 0,
+            available: 0,
+            unavailable: 0,
+            availablePercentage: 0,
+            unavailablePercentage: 0,
+          };
+
+          // 🔹 Pipeline for users & members
+          const userStats = await usersCollection
+            .aggregate([
+              {
+                $group: {
+                  _id: null,
+                  totalUsers: { $sum: 1 },
+                  membersCount: {
+                    $sum: {
+                      $cond: [{ $eq: ["$role", "member"] }, 1, 0],
+                    },
+                  },
+                },
+              },
+              {
+                $project: {
+                  _id: 0,
+                  totalUsers: 1,
+                  membersCount: 1,
+                },
+              },
+            ])
+            .toArray();
+
+          const users = userStats[0] || { totalUsers: 0, membersCount: 0 };
+
+          // 🔹 Combine results
+          res.json({
+            totalRooms: rooms.total,
+            availablePercentage: rooms.availablePercentage,
+            unavailablePercentage: rooms.unavailablePercentage,
+            totalUsers: users.totalUsers,
+            membersCount: users.membersCount,
+          });
+        } catch (err) {
+          console.error("GET /admin/stats aggregate error:", err);
           res.status(500).json({ message: "Server error" });
         }
       }
