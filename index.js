@@ -1,5 +1,4 @@
 require("dotenv").config();
-// At the top of your server file
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const express = require("express");
 const app = express();
@@ -32,7 +31,7 @@ admin.initializeApp({
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("Nexora");
 
@@ -43,7 +42,7 @@ async function run() {
     const announcementsCollection = db.collection("allAnnouncement");
     const couponsCollection = db.collection("allCoupons");
 
-    // 🔐 Middlewares
+    //  Middlewares
     const verifyFireBaseToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
       if (!authHeader) {
@@ -64,14 +63,11 @@ async function run() {
       }
     };
 
-    //🔐 verify admin role
+    // verify admin role
     const verifyAdmin = async (req, res, next) => {
       const email = req.decoded.email;
       const query = { email };
       const user = await usersCollection.findOne(query);
-
-      // used just for checking
-      // if (!user || user.role === "admin") {
 
       if (!user || user.role !== "admin") {
         return res.status(403).send({ message: "forbidden access" });
@@ -79,14 +75,11 @@ async function run() {
       next();
     };
 
-    //🔐 verify membar role
+    // verify membar role
     const verifyMembar = async (req, res, next) => {
       const email = req.decoded.email;
       const query = { email };
       const user = await usersCollection.findOne(query);
-
-      // used just for checking
-      // if (!user || user.role === "admin") {
 
       if (!user || user.role !== "member") {
         return res.status(403).send({ message: "forbidden access" });
@@ -94,46 +87,36 @@ async function run() {
       next();
     };
 
-
-
-
     // ----------------------------------------------------------------
-    //  🧮 apartments
+    //   apartments
     // ----------------------------------------------------------------
 
-    // ✅ GET Apartments with pagination + rent filter
+    //  GET Apartments with pagination + rent filter
     app.get("/apartments", async (req, res) => {
       try {
-        // 📌 Query params for pagination
         const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 8; // fits better with grid-cols-4
+        const limit = parseInt(req.query.limit) || 8;
         const skip = (page - 1) * limit;
 
-        // 📌 Query params for filtering
         const minRent = parseInt(req.query.minRent) || 0;
         const maxRent = parseInt(req.query.maxRent) || 9999999;
 
-        // 📌 Query params for sorting
-        const sortBy = req.query.sortBy || "rent"; // default sort field
-        const sortOrder = req.query.sortOrder === "desc" ? -1 : 1; // default ascending
+        const sortBy = req.query.sortBy || "rent";
+        const sortOrder = req.query.sortOrder === "desc" ? -1 : 1;
 
-        // 🔍 Build the MongoDB filter query
         const query = {
           rent: { $gte: minRent, $lte: maxRent },
         };
 
-        // 🧮 Count total documents matching query
         const total = await apartmentsCollection.countDocuments(query);
 
-        // 📦 Fetch paginated & sorted apartments
         const apartments = await apartmentsCollection
           .find(query)
-          .sort({ [sortBy]: sortOrder }) // ✅ dynamic sorting
+          .sort({ [sortBy]: sortOrder })
           .skip(skip)
           .limit(limit)
           .toArray();
 
-        // ✅ Respond with paginated result
         res.json({
           success: true,
           total,
@@ -148,10 +131,10 @@ async function run() {
     });
 
     // ----------------------------------------------------------------
-    //  ✅  agreements
+    //    agreements
     // ----------------------------------------------------------------
 
-    // ✅ POST new agreement request
+    //  POST new agreement request
     app.post("/agreements", verifyFireBaseToken, async (req, res) => {
       try {
         const agreementData = req.body;
@@ -165,7 +148,6 @@ async function run() {
           return res.status(400).json({ message: "Apartment Unavailable" });
         }
 
-        // Prevent duplicate pending
         const existing = await agreementsCollection.findOne({
           userEmail,
           status: "pending",
@@ -187,7 +169,7 @@ async function run() {
       }
     });
 
-    // ✅ GET agreements by status (admin only)
+    // GET agreements by status (admin only)
     app.get(
       "/agreements",
       verifyFireBaseToken,
@@ -206,7 +188,7 @@ async function run() {
       }
     );
 
-    // ✅ PATCH agreement (accept or reject)
+    //  PATCH agreement (accept or reject)
     app.patch(
       "/agreements/:id",
       verifyFireBaseToken,
@@ -227,13 +209,11 @@ async function run() {
           if (action === "accept") {
             newStatus = "accepted";
 
-            // make user a member
             await usersCollection.updateOne(
               { email: userEmail },
               { $set: { role: "member" } }
             );
 
-            // mark apartment unavailable
             if (agreement.apartmentId) {
               await apartmentsCollection.updateOne(
                 { _id: new ObjectId(agreement.apartmentId) },
@@ -298,7 +278,7 @@ async function run() {
     );
 
     cron.schedule("0 1 1 * *", async () => {
-      console.log("⏰ Running monthly rent generation...");
+      console.log(" Running monthly rent generation...");
       const now = new Date();
 
       const dueUsers = await usersCollection
@@ -307,7 +287,7 @@ async function run() {
 
       for (const u of dueUsers) {
         const lastRent = u.rentHistory?.[u.rentHistory.length - 1];
-        if (!lastRent || !lastRent.apartmentId) continue; // ✅ ensure we have apartmentId
+        if (!lastRent || !lastRent.apartmentId) continue;
 
         await rentPaymentsCollection.insertOne({
           userEmail: u.email,
@@ -334,7 +314,7 @@ async function run() {
                   year: "numeric",
                 }),
                 amount: lastRent.amount,
-                apartmentId: lastRent.apartmentId, // ✅ include apartmentId
+                apartmentId: lastRent.apartmentId,
                 status: "unpaid",
                 createdAt: now,
               },
@@ -344,7 +324,7 @@ async function run() {
       }
     });
 
-    // ✅ GET agreements for a specific user
+    //  GET agreements for a specific user
     app.get(
       "/agreements/user/:email",
       verifyFireBaseToken,
@@ -366,7 +346,7 @@ async function run() {
     );
 
     // ----------------------------------------------------------------
-    // ✅ USERS ROUTES
+    //  USERS ROUTES
     // ----------------------------------------------------------------
     // post an user to db
     app.post("/users", async (req, res) => {
@@ -401,8 +381,8 @@ async function run() {
       });
     });
 
-    // ✅ Get user role by email
-    app.get("/users/:email/role", async (req, res) => {
+    //  Get user role by email
+    app.get("/users/:email/role", verifyFireBaseToken, async (req, res) => {
       try {
         const email = req.params.email;
         if (!email) {
@@ -412,7 +392,6 @@ async function run() {
         const user = await usersCollection.findOne({ email });
 
         if (!user) {
-          // default role if not found
           return res.json({ role: "user" });
         }
 
@@ -424,10 +403,10 @@ async function run() {
     });
 
     // ----------------------------------------------------------------
-    // 🎟️ COUPONS ROUTES
+    //  COUPONS ROUTES
     // ----------------------------------------------------------------
 
-    // ✅ Validate coupon
+    //  Validate coupon
     app.post(
       "/coupons/validate",
       verifyFireBaseToken,
@@ -442,7 +421,6 @@ async function run() {
               .json({ valid: false, message: "Coupon code required" });
           }
 
-          // 🔎 Find coupon in database
           const coupon = await couponsCollection.findOne({ code: code.trim() });
 
           if (!coupon) {
@@ -451,19 +429,17 @@ async function run() {
               .json({ valid: false, message: "Coupon not found" });
           }
 
-          // ✅ Check expiry date here
           if (coupon.expiryDate && new Date() > new Date(coupon.expiryDate)) {
             return res
               .status(400)
               .json({ valid: false, message: "Coupon expired" });
           }
 
-          // ✅ If valid, return discount info
           return res.json({
             valid: true,
             discountPercent: coupon.discount,
             description: coupon.description,
-            expiryDate: coupon.expiryDate, // include expiry date in response if needed
+            expiryDate: coupon.expiryDate,
           });
         } catch (err) {
           console.error("POST /coupons/validate error:", err);
@@ -505,7 +481,7 @@ async function run() {
           discount,
           description,
           expiryDate: new Date(expiryDate),
-          available: typeof available === "boolean" ? available : true, // default to true
+          available: typeof available === "boolean" ? available : true,
           createdAt: new Date(),
         };
 
@@ -595,13 +571,14 @@ async function run() {
     );
 
     // ----------------------------------------------------------------
-    // 💸 RENT ROUTES
+    //  RENT ROUTES
     // ----------------------------------------------------------------
 
-    // ✅ Create payment intent (protected)
+    //  Create payment intent (protected)
     app.post(
       "/create-payment-intent",
       verifyFireBaseToken,
+      verifyMembar,
       async (req, res) => {
         try {
           const { amountInCents, userEmail, apartmentNo, fullName } = req.body;
@@ -610,7 +587,6 @@ async function run() {
             return res.status(400).json({ message: "Invalid amount" });
           }
 
-          // ✅ (optional) log or validate extra info
           console.log("Creating payment intent for:", {
             userEmail,
             apartmentNo,
@@ -637,7 +613,7 @@ async function run() {
       }
     );
 
-    // ✅ Record rent payment (manual trigger, kept for compatibility)
+    //  Record rent payment (manual trigger, kept for compatibility)
     app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
       try {
         const { userEmail, apartmentId, month, amount } = req.body;
@@ -666,7 +642,7 @@ async function run() {
               status: "paid",
               paidAt: new Date(),
               amount,
-              transactionId: result.paymentIntent.id, // ✅ save transaction ID
+              transactionId: result.paymentIntent.id,
             },
           }
         );
@@ -687,7 +663,7 @@ async function run() {
       }
     });
 
-    // ✅ Get rent payments for a user
+    //  Get rent payments for a user
     app.get("/rent-payments/:email", verifyFireBaseToken, async (req, res) => {
       try {
         const email = req.params.email;
@@ -704,7 +680,7 @@ async function run() {
       }
     });
 
-    // ✅ Update a rent payment status
+    // Update a rent payment status
     app.patch("/rent-payments/:id", verifyFireBaseToken, async (req, res) => {
       try {
         const id = req.params.id;
@@ -810,7 +786,6 @@ async function run() {
               message: "Announcement not found or unchanged",
             });
           }
-
           res.json({
             success: true,
             message: "Announcement updated successfully",
@@ -851,10 +826,10 @@ async function run() {
     );
 
     // ----------------------------------------------------------------
-    // ✅ ADMIN DASHBOARD ROUTES
+    //  ADMIN DASHBOARD ROUTES
     // ----------------------------------------------------------------
 
-    // ✅ GET all members with userName from allAgreements
+    //  GET all members with userName from allAgreements
     app.get("/members", verifyFireBaseToken, verifyAdmin, async (req, res) => {
       try {
         const members = await usersCollection
@@ -897,7 +872,7 @@ async function run() {
       }
     });
 
-    // ✅ Remove member (change role to user)
+    //  Remove member (change role to user)
     app.patch(
       "/members/:email/remove",
       verifyFireBaseToken,
@@ -906,7 +881,6 @@ async function run() {
         try {
           const email = req.params.email;
 
-          // Find the member's current active agreement (accepted)
           const agreement = await agreementsCollection.findOne({
             userEmail: email,
             status: "accepted",
@@ -918,7 +892,6 @@ async function run() {
               .json({ message: "Member's agreement not found" });
           }
 
-          // Update the apartment availability to true (free it)
           if (agreement.apartmentId) {
             await apartmentsCollection.updateOne(
               { _id: new ObjectId(agreement.apartmentId) },
@@ -926,7 +899,6 @@ async function run() {
             );
           }
 
-          // Change role to "user"
           const updateRes = await usersCollection.updateOne(
             { email },
             { $set: { role: "user" } }
@@ -947,7 +919,7 @@ async function run() {
       }
     );
 
-    // ✅ Get due months for a member
+    //  Get due months for a member
     app.get(
       "/members/:email/due-months",
       verifyFireBaseToken,
@@ -974,7 +946,6 @@ async function run() {
       verifyAdmin,
       async (req, res) => {
         try {
-          // 🔹 Pipeline for apartments availability
           const roomStats = await apartmentsCollection
             .aggregate([
               {
@@ -1034,7 +1005,6 @@ async function run() {
             unavailablePercentage: 0,
           };
 
-          // 🔹 Pipeline for users & members
           const userStats = await usersCollection
             .aggregate([
               {
@@ -1076,10 +1046,10 @@ async function run() {
     );
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
   }
 }
