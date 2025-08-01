@@ -575,33 +575,65 @@ async function run() {
     // ----------------------------------------------------------------
 
     //  Create payment intent (protected)
+
     app.post(
       "/create-payment-intent",
       verifyFireBaseToken,
       verifyMembar,
       async (req, res) => {
         try {
-          const { amountInCents, userEmail, apartmentNo, fullName } = req.body;
+          const { userEmail, apartmentNo, fullName, couponCode } = req.body;
+
+          // Step 1: Get the user's agreement to get actual rent from DB
+          const agreement = await agreementsCollection.findOne({
+            userEmail,
+            apartmentNo,
+            status: "accepted",
+          });
+
+          if (!agreement) {
+            return res.status(404).json({ message: "Agreement not found" });
+          }
+
+          let rentAmount = agreement.rent; // this is the original amount from DB
+          let discountPercent = 0;
+
+          // Step 2: If coupon provided, apply discount
+          if (couponCode) {
+            const coupon = await couponsCollection.findOne({
+              code: couponCode.trim(),
+            });
+            if (
+              coupon &&
+              (!coupon.expiryDate || new Date() <= new Date(coupon.expiryDate))
+            ) {
+              discountPercent = coupon.discount || 0;
+              rentAmount = Math.round(
+                rentAmount - (rentAmount * discountPercent) / 100
+              );
+            } else {
+              return res
+                .status(400)
+                .json({ message: "Invalid or expired coupon" });
+            }
+          }
+
+          const amountInCents = rentAmount * 100;
 
           if (!amountInCents || amountInCents <= 0) {
             return res.status(400).json({ message: "Invalid amount" });
           }
-
-          console.log("Creating payment intent for:", {
-            userEmail,
-            apartmentNo,
-            fullName,
-            amountInCents,
-          });
 
           const paymentIntent = await stripe.paymentIntents.create({
             amount: amountInCents,
             currency: "bdt",
             payment_method_types: ["card"],
             metadata: {
-              userEmail: userEmail || "",
-              apartmentNo: apartmentNo || "",
-              fullName: fullName || "",
+              userEmail,
+              apartmentNo,
+              fullName,
+              couponCode: couponCode || "none",
+              discountPercent: discountPercent.toString(),
             },
           });
 
@@ -616,9 +648,15 @@ async function run() {
     //  Record rent payment (manual trigger, kept for compatibility)
     app.post("/rent-payments", verifyFireBaseToken, async (req, res) => {
       try {
-        const { userEmail, apartmentId, month, amount } = req.body;
+        const {
+          userEmail,
+          apartmentId,
+          month,
+          transactionId,
+          couponCode = null,
+        } = req.body;
 
-        if (!userEmail || !apartmentId || !month || !amount) {
+        if (!userEmail || !apartmentId || !month || !transactionId) {
           return res.status(400).json({ message: "Missing required fields" });
         }
 
@@ -635,14 +673,34 @@ async function run() {
           });
         }
 
+        // ✅ Retrieve actual payment info from Stripe
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          transactionId
+        );
+        if (!paymentIntent || paymentIntent.status !== "succeeded") {
+          return res
+            .status(400)
+            .json({ message: "Payment not completed or invalid" });
+        }
+
+        const actualAmount = paymentIntent.amount_received / 100;
+
+        // ✅ Extract discount percent from metadata if available
+        const discountPercent = paymentIntent.metadata?.discountPercent
+          ? parseInt(paymentIntent.metadata.discountPercent)
+          : 0;
+
+        // ✅ Update rent payment record
         await rentPaymentsCollection.updateOne(
           { _id: unpaid._id },
           {
             $set: {
               status: "paid",
               paidAt: new Date(),
-              amount,
-              transactionId: result.paymentIntent.id,
+              amount: actualAmount,
+              transactionId: paymentIntent.id,
+              couponCode: couponCode || null,
+              discountPercent,
             },
           }
         );
@@ -680,11 +738,32 @@ async function run() {
       }
     });
 
-    // Update a rent payment status
+    // Update a rent payment status (fetches Stripe payment details to update amount and discount)
     app.patch("/rent-payments/:id", verifyFireBaseToken, async (req, res) => {
       try {
         const id = req.params.id;
         const { status, transactionId } = req.body;
+
+        if (!transactionId) {
+          return res.status(400).json({ message: "transactionId is required" });
+        }
+
+        // Retrieve paymentIntent from Stripe
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          transactionId
+        );
+        if (!paymentIntent || paymentIntent.status !== "succeeded") {
+          return res
+            .status(400)
+            .json({ message: "Payment not completed or invalid" });
+        }
+        const actualAmount = paymentIntent.amount_received / 100;
+
+        // Extract couponCode and discountPercent from metadata if any
+        const couponCode = paymentIntent.metadata?.couponCode || null;
+        const discountPercent = paymentIntent.metadata?.discountPercent
+          ? parseInt(paymentIntent.metadata.discountPercent)
+          : 0;
 
         const updateResult = await rentPaymentsCollection.updateOne(
           { _id: new ObjectId(id) },
@@ -692,7 +771,10 @@ async function run() {
             $set: {
               status: status || "paid",
               paidAt: new Date(),
-              transactionId: transactionId,
+              transactionId,
+              amount: actualAmount,
+              couponCode,
+              discountPercent,
             },
           }
         );
