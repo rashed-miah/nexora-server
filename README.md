@@ -212,5 +212,5 @@ Feel free to use, modify, and distribute.
 Backend for Nexora Apartment Management with full-featured APIs, Stripe integration, and cron-powered rent management.
 
 💻 Built by ❤️ by Taj Uddin
-📧 Contact: tajuddin.cse.dev@gmaail.com
+📧 Contact: tajuddin.cse.dev@gmail.com
 ```
