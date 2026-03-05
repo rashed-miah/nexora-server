@@ -46,7 +46,7 @@ It provides secure REST APIs for apartments, agreements, users, coupons, announc
 1. **Clone the repository**
 
 ```bash
-git clone (https://github.com/rashed-miah/nexora-server)
+git clone https://github.com/rashed-miah/nexora-server
 cd nexora-backend
 
 
