@@ -41,7 +41,7 @@ It provides secure REST APIs for apartments, agreements, users, coupons, announc
 
 ---
 
-## 📦 Installation
+## 📦 Installation process
 
 1. **Clone the repository**
 
@@ -211,6 +211,4 @@ Feel free to use, modify, and distribute.
 💡 About
 Backend for Nexora Apartment Management with full-featured APIs, Stripe integration, and cron-powered rent management.
 
-💻 Built by ❤️ by Taj Uddin
-📧 Contact: tajuddin.cse.dev@gmail.com
 ```
