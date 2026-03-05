@@ -17,7 +17,7 @@ It provides secure REST APIs for apartments, agreements, users, coupons, announc
 ## ✨ Features
 
 ✅ **JWT-like verification via Firebase Admin SDK**  
-✅ **Role-based routes (admin / member)**  
+✅ **Role-based routes (admin/member)**  
 ✅ **Apartments CRUD with pagination and filtering**  
 ✅ **Agreements workflow (request, approve/reject)**  
 ✅ **Coupons management and validation**  
