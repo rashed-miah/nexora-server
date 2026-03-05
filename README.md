@@ -52,7 +52,7 @@ cd nexora-backend
 
 
 2. Install dependencies
-npm i
+npm install
 
 
 
